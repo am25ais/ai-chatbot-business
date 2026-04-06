@@ -2,16 +2,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
-from sentence_transformers import SentenceTransformer
 from supabase import create_client
 from anthropic import Anthropic
 from dotenv import load_dotenv
+import hashlib
 
 load_dotenv()
 
 app = FastAPI()
 
-# Allow frontend to talk to backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,9 +18,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load models
-print("Loading models...")
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_ANON_KEY"))
 anthropic = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -29,8 +25,22 @@ class ChatRequest(BaseModel):
     message: str
     business_id: str
 
+def simple_embedding(text):
+    # Simple deterministic embedding using hashing
+    words = text.lower().split()
+    embedding = [0.0] * 384
+    for i, word in enumerate(words):
+        hash_val = int(hashlib.md5(word.encode()).hexdigest(), 16)
+        for j in range(min(10, 384)):
+            embedding[(hash_val + j * i) % 384] += 1.0
+    # Normalize
+    magnitude = sum(x**2 for x in embedding) ** 0.5
+    if magnitude > 0:
+        embedding = [x/magnitude for x in embedding]
+    return embedding
+
 def search_documents(query, business_id):
-    query_embedding = embedder.encode(query).tolist()
+    query_embedding = simple_embedding(query)
     result = supabase.rpc("match_documents", {
         "query_embedding": query_embedding,
         "match_business_id": business_id,
