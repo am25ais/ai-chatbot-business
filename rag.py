@@ -1,22 +1,36 @@
 import os
-from sentence_transformers import SentenceTransformer
+import hashlib
 from supabase import create_client
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Load free embedding model
-print("Loading embedding model...")
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
-
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_ANON_KEY"))
 anthropic = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-# Step 1 — Embed and store business data
+# Same embedding function as server.py
+def simple_embedding(text):
+    words = text.lower().split()
+    embedding = [0.0] * 384
+    for i, word in enumerate(words):
+        hash_val = int(hashlib.md5(word.encode()).hexdigest(), 16)
+        for j in range(min(10, 384)):
+            embedding[(hash_val + j * i) % 384] += 1.0
+    magnitude = sum(x**2 for x in embedding) ** 0.5
+    if magnitude > 0:
+        embedding = [x/magnitude for x in embedding]
+    return embedding
+
+# Step 1 — Clear old data
+def clear_business_data(business_id):
+    supabase.table("documents").delete().eq("business_id", business_id).execute()
+    print(f"✅ Cleared old data for {business_id}")
+
+# Step 2 — Store new data
 def store_business_data(business_id, documents):
     for doc in documents:
-        embedding = embedder.encode(doc).tolist()
+        embedding = simple_embedding(doc)
         supabase.table("documents").insert({
             "business_id": business_id,
             "content": doc,
@@ -24,9 +38,9 @@ def store_business_data(business_id, documents):
         }).execute()
         print(f"✅ Stored: {doc[:60]}...")
 
-# Step 2 — Search similar documents
+# Step 3 — Search
 def search_documents(query, business_id):
-    query_embedding = embedder.encode(query).tolist()
+    query_embedding = simple_embedding(query)
     result = supabase.rpc("match_documents", {
         "query_embedding": query_embedding,
         "match_business_id": business_id,
@@ -34,7 +48,7 @@ def search_documents(query, business_id):
     }).execute()
     return [r["content"] for r in result.data]
 
-# Step 3 — Answer using Claude
+# Step 4 — Ask chatbot
 def ask_chatbot(question, business_id):
     relevant_docs = search_documents(question, business_id)
     context = "\n".join(relevant_docs)
@@ -46,7 +60,7 @@ def ask_chatbot(question, business_id):
     )
     return message.content[0].text
 
-# --- TEST IT ---
+# --- RUN IT ---
 business_data = [
     "We are Mario's Pizza. We are open 9am to 10pm every day.",
     "We deliver within 5 miles. Delivery takes 30-45 minutes.",
@@ -57,7 +71,10 @@ business_data = [
     "We accept cash, card and all digital payments.",
 ]
 
-print("Storing business data...")
+print("Clearing old data...")
+clear_business_data("marios-pizza")
+
+print("\nStoring new data...")
 store_business_data("marios-pizza", business_data)
 
 print("\nTesting chatbot...")
